@@ -37,16 +37,26 @@ and a browser refresh signs you out. For production, put the app behind the comp
 
 ## Data
 
-Two buttons at the top switch between the two dashboards.
+The left sidebar holds the data and filters:
+
+- **Data origin**: two buttons switch between the real-data and synthetic-data dashboards.
+- **Application**: one app or all. ClickHouse stores only app IDs, so the app shows as `App a1db2bf3` until
+  you give it a name in `data\app_names.csv` (columns `app_id,app_name`).
+- **Policy decision**: all decisions, allowed only, or blocked only.
+- **Date range** (UTC).
+
+The filters apply to every section, including the LLM usage figures and the CSV download.
 
 **Real data**: every Excel export an admin has uploaded, combined. Rows that appear in more than one
 upload are counted once. Files live in `data\real\uploads\`. Your first export is already loaded (`initial_clickhouse_export.xlsx`).
 
 **Synthetic data**: `data\synthetic\clickhouse_export_synthetic.xlsx`: 201 fictional prompts over
 four weeks, 24 users, with prompt-injection, credential, personal-data and exfiltration attempts,
-some repeated probing, and pipeline failures. The page shows a yellow banner whenever it is in use.
-Recreate it with `python generate_synthetic.py`. Policy codes S07, S15, S16 and S17, the intents
-Analyze, Search and Action, and error code LLM001 are made up for the demo.
+some repeated probing, and pipeline failures, spread over three fictional applications (Pharma
+regulatory assistant, Quality docs copilot, HR policy assistant). The page shows a yellow banner
+whenever it is in use. Recreate it with `python generate_synthetic.py`. Policy codes S07, S15, S16
+and S17, the intents Analyze, Search and Action, error code LLM001 and the three app IDs are made up
+for the demo.
 
 ### Uploading an export (admin)
 
@@ -58,15 +68,14 @@ Use the sidebar. The file must be `.xlsx` with the sheets `graph_state_events` a
 
 ## What's on the page
 
+One scrolling page with four sections. The links under the title jump to each one.
+
 | Section | Shows | Form |
 |---|---|---|
-| KPI row | Prompts, blocked, high-risk, failed runs, users | Stat tiles |
-| Activity | Prompts per day (per week past ~2 months), allowed vs blocked | Stacked columns |
-| Is it safe? | Prompts by risk level and by policy category; users with the most blocks; prompts to review | Bars + table |
-| How is it being used? | Intents, and the capabilities the router asked for | Ranked bars |
-| Is it working? | Pipeline errors by module and code | Table |
-| LLM usage | Calls, tokens and latency; tokens by pipeline step; per-model table | Stat tiles + bars + table |
-| Audit trail | Every prompt, searchable, with CSV download | Table |
+| Executive overview | Prompts, blocked, high-risk, failed runs, users; prompt activity per day (per week past ~2 months), allowed vs blocked; intents | Stat tiles, stacked columns, ranked bars |
+| Security & policy | Prompts by risk level and by policy category; users with the most blocks; prompts to review | Bars + table |
+| Usage intelligence | Capabilities the router asked for; pipeline errors; LLM calls, tokens and latency; tokens by pipeline step; per-model table | Bars, tables, stat tiles |
+| Prompt explorer | Every prompt, searchable, with CSV download. Click a row to see its decision, risk, policy, intent, outcome, gate explanation, router flags and response | Table + detail panel |
 
 Colours stay the same on every chart: blue = allowed, orange = blocked. Risk uses red, amber and
 green, always with its text label.
@@ -91,6 +100,7 @@ auth.py                 login check + password-hash helper
 generate_synthetic.py   builds the synthetic workbook
 .streamlit\config.toml  white theme
 .streamlit\secrets.toml users and password hashes (keep out of git)
+data\app_names.csv      optional readable names for app IDs
 data\real\uploads\      uploaded real exports
 data\synthetic\         synthetic export
 ```

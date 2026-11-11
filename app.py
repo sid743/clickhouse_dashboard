@@ -5,6 +5,8 @@ Cortexa - AI Auditing & Security dashboard
 Run:  streamlit run app.py
 """
 
+import html
+
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -25,6 +27,8 @@ STEP_NAMES = {"decision_gate": "Decision gate", "intent_classifier": "Intent cla
               "llm_caller": "LLM caller"}
 INK, INK2, MUTED, GRID, AXIS = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+SECTIONS = [("Executive overview", "executive-overview"), ("Security & policy", "security-policy"),
+            ("Usage intelligence", "usage-intelligence"), ("Prompt explorer", "prompt-explorer")]
 
 st.markdown(f"""
 <style>
@@ -34,22 +38,32 @@ st.markdown(f"""
   .tile-label {{ color: {INK2}; font-size: 0.85rem; }}
   .tile-value {{ color: {INK}; font-size: 1.9rem; font-weight: 600; line-height: 1.2; margin-top: 2px; }}
   .tile-note {{ color: {MUTED}; font-size: 0.8rem; margin-top: 2px; }}
+  .tile.small .tile-value {{ font-size: 1.15rem; }}
   .synthetic {{ border-left: 4px solid #fab219; background: #fffaf0; padding: 10px 14px; border-radius: 6px;
                color: {INK}; font-size: 0.9rem; margin: 4px 0 8px 0; }}
   .section-q {{ color: {INK2}; margin-top: -0.6rem; margin-bottom: 0.6rem; font-size: 0.92rem; }}
+  .nav {{ font-size: 0.92rem; margin: 0.2rem 0 0.4rem 0; }}
+  .nav a {{ color: {BLUE}; text-decoration: none; margin-right: 1.1rem; }}
+  .brand {{ font-size: 1.5rem; font-weight: 700; color: {INK}; letter-spacing: 0.02em; line-height: 1.1; }}
+  .brand-sub {{ font-size: 0.75rem; font-weight: 600; color: {MUTED}; letter-spacing: 0.08em; margin-bottom: 0.6rem; }}
+  .side-head {{ font-size: 0.8rem; font-weight: 700; color: {INK}; letter-spacing: 0.06em; margin: 0.4rem 0 0.2rem 0; }}
+  .prompt-text {{ font-size: 1.1rem; color: {INK}; margin: 0.2rem 0 0.5rem 0; }}
+  .meta {{ color: {MUTED}; font-size: 0.82rem; }}
+  .caps div {{ margin: 0.15rem 0; color: {INK}; }}
+  .caps .off {{ color: {MUTED}; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-def tile(col, label, value, note=""):
-    col.markdown(f'<div class="tile"><div class="tile-label">{label}</div>'
+def tile(col, label, value, note="", small=False):
+    col.markdown(f'<div class="tile{" small" if small else ""}"><div class="tile-label">{label}</div>'
                  f'<div class="tile-value">{value}</div><div class="tile-note">{note}</div></div>',
                  unsafe_allow_html=True)
 
 
-def section(title, question):
+def section(title, anchor, question):
     st.markdown("")
-    st.subheader(title)
+    st.header(title, anchor=anchor, divider="gray")
     st.markdown(f'<div class="section-q">{question}</div>', unsafe_allow_html=True)
 
 
@@ -89,6 +103,10 @@ def fmt_int(n):
 def short_model(names):
     """amazon.nova-lite-v1:0 -> nova-lite-v1"""
     return names.astype(str).str.split(":").str[0].str.replace(r"^(amazon|openai|anthropic|meta)\.", "", regex=True)
+
+
+def text_or(value, default="–"):
+    return default if value is None or (isinstance(value, float) and pd.isna(value)) or value == "" else value
 
 
 # --------------------------------------------------------------------------- login
@@ -158,78 +176,95 @@ def load_dataset(name):
     return (*load(file_key(files)), None)
 
 
-# --------------------------------------------------------------------------- sidebar
+def admin_upload():
+    st.markdown('<div class="side-head">UPLOAD A CLICKHOUSE EXPORT</div>', unsafe_allow_html=True)
+    st.caption("Excel file with the sheets graph_state_events and llm_calls. Goes into the real-data dashboard.")
+    if msg := st.session_state.pop("upload_msg", None):
+        st.success(msg)
+    up = st.file_uploader("Export (.xlsx)", type=["xlsx"], key=f"up_{st.session_state.upload_key}",
+                          label_visibility="collapsed")
+    if up is not None:
+        try:
+            g_new, _ = cd.read_export(up)
+            p_new = cd.build_prompts(g_new)
+            current, _, _ = load_dataset("real")
+            known = set(current["event_id"]) if current is not None else set()
+            n_new = int((~p_new["event_id"].isin(known)).sum()) if len(p_new) else 0
+            if len(p_new):
+                st.info(f"{len(p_new)} prompts from {p_new['time'].min():%d %b %Y} to "
+                        f"{p_new['time'].max():%d %b %Y}: {n_new} new, "
+                        f"{len(p_new) - n_new} already in the dashboard.")
+            else:
+                st.warning("The file has the right sheets but no prompts.")
+            mode = st.radio("Load it by", ["Adding to current real data", "Replacing current real data"],
+                            help="Adding keeps earlier uploads and skips duplicate rows. "
+                                 "Replacing moves earlier uploads to data/real/archive.")
+            if st.button("Save to dashboard", type="primary", width="stretch", disabled=not len(p_new)):
+                saved = cd.save_upload(up, replace=mode.startswith("Replacing"))
+                st.session_state.upload_msg = f"Saved {saved.name}."
+                st.session_state.upload_key += 1
+                st.session_state.dataset = "real"
+                st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    files = cd.real_files()
+    with st.expander(f"Real-data files ({len(files)})"):
+        for f in files:
+            st.caption(f.name)
+        if not files:
+            st.caption("None yet.")
 
-with st.sidebar:
-    st.markdown(f"Signed in as **{st.session_state.user}**  \n{'Admin' if IS_ADMIN else 'Viewer'}")
-    if st.button("Sign out", width="stretch"):
-        for k in ("user", "role"):
-            st.session_state.pop(k, None)
+
+# --------------------------------------------------------------------------- sidebar: data & filters
+
+sidebar = st.sidebar
+sidebar.markdown('<div class="brand">CORTEXA</div><div class="brand-sub">AI AUDIT CONSOLE</div>',
+                 unsafe_allow_html=True)
+sidebar.markdown('<div class="side-head">DATA & FILTERS</div>', unsafe_allow_html=True)
+sidebar.caption("Data origin")
+for label, name in (("View real data dashboard", "real"), ("View synthetic data dashboard", "synthetic")):
+    if sidebar.button(label, type="primary" if st.session_state.dataset == name else "secondary",
+                      width="stretch", key=f"ds_{name}"):
+        st.session_state.dataset = name
         st.rerun()
-
-    if IS_ADMIN:
-        st.divider()
-        st.markdown("**Upload a ClickHouse export**")
-        st.caption("Excel file with the sheets graph_state_events and llm_calls. Goes into the real-data dashboard.")
-        if msg := st.session_state.pop("upload_msg", None):
-            st.success(msg)
-        up = st.file_uploader("Export (.xlsx)", type=["xlsx"], key=f"up_{st.session_state.upload_key}",
-                              label_visibility="collapsed")
-        if up is not None:
-            try:
-                g_new, _ = cd.read_export(up)
-                p_new = cd.build_prompts(g_new)
-                current, _, _ = load_dataset("real")
-                known = set(current["event_id"]) if current is not None else set()
-                n_new = int((~p_new["event_id"].isin(known)).sum()) if len(p_new) else 0
-                if len(p_new):
-                    st.info(f"{len(p_new)} prompts from {p_new['time'].min():%d %b %Y} to "
-                            f"{p_new['time'].max():%d %b %Y}: {n_new} new, "
-                            f"{len(p_new) - n_new} already in the dashboard.")
-                else:
-                    st.warning("The file has the right sheets but no prompts.")
-                mode = st.radio("Load it by", ["Adding to current real data", "Replacing current real data"],
-                                help="Adding keeps earlier uploads and skips duplicate rows. "
-                                     "Replacing moves earlier uploads to data/real/archive.")
-                if st.button("Save to dashboard", type="primary", width="stretch", disabled=not len(p_new)):
-                    saved = cd.save_upload(up, replace=mode.startswith("Replacing"))
-                    st.session_state.upload_msg = f"Saved {saved.name}."
-                    st.session_state.upload_key += 1
-                    st.session_state.dataset = "real"
-                    st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-        files = cd.real_files()
-        with st.expander(f"Real-data files ({len(files)})"):
-            for f in files:
-                st.caption(f.name)
-            if not files:
-                st.caption("None yet.")
-
-
-# --------------------------------------------------------------------------- header & dataset switch
-
-st.title("AI Auditing & Security")
-st.markdown(f'<div class="section-q">How is our AI being used, and is it safe? · Cortexa ClickHouse telemetry</div>',
-            unsafe_allow_html=True)
-
-b1, b2, _ = st.columns([1.5, 1.7, 3.6])
-if b1.button("View real data dashboard", type="primary" if st.session_state.dataset == "real" else "secondary",
-             width="stretch"):
-    st.session_state.dataset = "real"
-    st.rerun()
-if b2.button("View synthetic data dashboard",
-             type="primary" if st.session_state.dataset == "synthetic" else "secondary", width="stretch"):
-    st.session_state.dataset = "synthetic"
-    st.rerun()
 
 DATASET = st.session_state.dataset
 prompts_all, calls_all, problem = load_dataset(DATASET)
+
+if not problem and not prompts_all.empty:
+    names = cd.app_names()  # read every run so edits to app_names.csv show up straight away
+    prompts_all = prompts_all.assign(app=prompts_all["app_id"].map(lambda a: cd.app_label(a, names)))
+    apps = sorted(prompts_all["app"].unique())
+    app_pick = sidebar.selectbox("Application", ["All applications"] + apps, key=f"app_{DATASET}")
+    decision_pick = sidebar.selectbox("Policy decision", ["All decisions", "Allowed only", "Blocked only"],
+                                      key=f"decision_{DATASET}")
+    first, last = prompts_all["time"].min().date(), prompts_all["time"].max().date()
+    picked = sidebar.date_input("Date range (UTC)", value=(first, last), min_value=first, max_value=last,
+                                format="DD/MM/YYYY", key=f"dates_{DATASET}_{first}_{last}")
+    start, end = (picked if isinstance(picked, (list, tuple)) and len(picked) == 2 else (first, last))
+    sidebar.caption("Filters apply to every section.")
+
+sidebar.divider()
+sidebar.markdown(f"Signed in as **{st.session_state.user}** · {'Admin' if IS_ADMIN else 'Viewer'}")
+if sidebar.button("Sign out", width="stretch"):
+    for k in ("user", "role"):
+        st.session_state.pop(k, None)
+    st.rerun()
+if IS_ADMIN:
+    sidebar.divider()
+    with sidebar:
+        admin_upload()
+
+
+# --------------------------------------------------------------------------- header
+
+st.title("AI Auditing & Security")
+st.markdown('<div class="section-q">How is our AI being used, and is it safe? · Cortexa ClickHouse telemetry</div>',
+            unsafe_allow_html=True)
 if DATASET == "synthetic":
-    st.markdown('<div class="synthetic"><b>Synthetic demo data.</b> Every prompt, user and attack below is fictional, '
-                'generated to show what the dashboard looks like with more activity. It is not real Cortexa traffic.</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="synthetic"><b>Synthetic demo data.</b> Every prompt, user, application and attack below '
+                'is fictional, generated to show what the dashboard looks like with more activity. '
+                'It is not real Cortexa traffic.</div>', unsafe_allow_html=True)
 if problem:
     st.info(problem)
     st.stop()
@@ -237,19 +272,20 @@ if prompts_all.empty:
     st.info("The loaded export contains no prompts.")
     st.stop()
 
-# Filter row - one control, scopes everything below
-first, last = prompts_all["time"].min().date(), prompts_all["time"].max().date()
-f1, f2 = st.columns([1.6, 4.4], vertical_alignment="bottom")
-picked = f1.date_input("Date range (UTC)", value=(first, last), min_value=first, max_value=last,
-                       format="DD/MM/YYYY", key=f"dates_{DATASET}_{first}_{last}")
-start, end = (picked if isinstance(picked, (list, tuple)) and len(picked) == 2 else (first, last))
-in_range = lambda s: (s >= pd.Timestamp(start)) & (s < pd.Timestamp(end) + pd.Timedelta(days=1))
-P = prompts_all[in_range(prompts_all["time"])]
-C = calls_all[in_range(calls_all["event_timestamp"])]
-f2.caption(f"{len(P):,} prompts between {start:%d %b %Y} and {end:%d %b %Y}. All times are UTC as stored in ClickHouse.")
+mask = (prompts_all["time"] >= pd.Timestamp(start)) & (prompts_all["time"] < pd.Timestamp(end) + pd.Timedelta(days=1))
+if app_pick != "All applications":
+    mask &= prompts_all["app"] == app_pick
+if decision_pick != "All decisions":
+    mask &= prompts_all["decision"] == decision_pick.split()[0]
+P = prompts_all[mask]
+C = calls_all[calls_all["event_id"].isin(P["event_id"])]
 
+st.markdown('<div class="nav">' + "".join(f'<a href="#{a}">{t}</a>' for t, a in SECTIONS) + "</div>",
+            unsafe_allow_html=True)
+st.caption(f"{len(P):,} prompts · {app_pick} · {decision_pick} · {start:%d %b %Y} to {end:%d %b %Y}. "
+           "All times are UTC as stored in ClickHouse.")
 if P.empty:
-    st.info("No prompts in this date range.")
+    st.info("No prompts match these filters.")
     st.stop()
 
 has_users = P["user_id"].notna().any()
@@ -263,7 +299,9 @@ failed = int((P["outcome"] == "Failed").sum())
 present = [d for d in DECISION_DOMAIN if d in set(P["decision"])]
 DECISION_SCALE = alt.Scale(domain=present, range=[DECISION_RANGE[DECISION_DOMAIN.index(d)] for d in present])
 
-# --------------------------------------------------------------------------- KPI row
+
+# =========================================================================== 1. Executive overview
+section("Executive overview", "executive-overview", "How much is the AI being used, what for, and how much is blocked?")
 k = st.columns(5)
 tile(k[0], "Prompts", fmt_int(n), f"{P['date'].nunique()} active days")
 tile(k[1], "Blocked by policy", fmt_int(blocked), f"{blocked / n:.0%} of prompts")
@@ -272,35 +310,47 @@ tile(k[2], "High-risk prompts", fmt_int(len(high)),
 tile(k[3], "Failed runs", fmt_int(failed), f"{failed / max(len(allowed), 1):.0%} of allowed prompts")
 tile(k[4], "Users", fmt_int(P["user_id"].nunique()) if has_users else "–",
      f"{P['session_id'].nunique()} sessions" if has_users else "user_id not recorded")
+st.markdown("")
 
-# --------------------------------------------------------------------------- activity
-section("Activity", "How much is the AI being used, and how much of it is blocked?")
-span_days = (P["date"].max() - P["date"].min()).days
-period = "week" if span_days > 62 else "day"
-to_period = (lambda s: s.dt.to_period("W").dt.start_time) if period == "week" else (lambda s: s.dt.normalize())
-act = P.assign(period=to_period(P["time"])).groupby(["period", "decision"]).size().reset_index(name="prompts")
-# every day/week in the range gets a slot, so quiet days show as gaps rather than disappearing
-slots = pd.date_range(to_period(pd.Series([pd.Timestamp(start)]))[0], pd.Timestamp(end),
-                      freq="W-MON" if period == "week" else "D")
-act = act.pivot(index="period", columns="decision", values="prompts").reindex(slots, fill_value=0).fillna(0)
-act = act.rename_axis("period").reset_index().melt("period", var_name="decision", value_name="prompts")
-act["label"] = act["period"].dt.strftime("%d %b")
-act["stack"] = act["decision"].map({"Allowed": 0, "Blocked": 1}).fillna(2)
-bar_px = int(max(4, min(24, 0.6 * 1100 / len(slots))))  # thin columns, capped at 24px
-activity = alt.Chart(act).mark_bar(size=bar_px, stroke="#ffffff", strokeWidth=1).encode(
-    x=alt.X("label:O", title=None, sort=act["label"].unique().tolist(),
-            axis=alt.Axis(labelAngle=0, ticks=False, labelOverlap="greedy", labelSeparation=8)),
-    y=alt.Y("sum(prompts):Q", title=f"Prompts per {period}", axis=alt.Axis(tickMinStep=1)),
-    color=alt.Color("decision:N", scale=DECISION_SCALE),
-    order=alt.Order("stack:Q"),
-    tooltip=[alt.Tooltip("label:O", title="Week of" if period == "week" else "Day"),
-             alt.Tooltip("decision:N", title="Decision"), alt.Tooltip("sum(prompts):Q", title="Prompts")],
-)
-show(activity, 240)
+o1, o2 = st.columns([3, 2], gap="large")
+with o1:
+    span_days = (P["date"].max() - P["date"].min()).days
+    period = "week" if span_days > 62 else "day"
+    st.markdown(f"**Prompt activity** · per {period}, allowed vs blocked")
+    to_period = (lambda s: s.dt.to_period("W").dt.start_time) if period == "week" else (lambda s: s.dt.normalize())
+    act = P.assign(period=to_period(P["time"])).groupby(["period", "decision"]).size().reset_index(name="prompts")
+    # every day/week in the range gets a slot, so quiet days show as gaps rather than disappearing
+    slots = pd.date_range(to_period(pd.Series([pd.Timestamp(start)]))[0], pd.Timestamp(end),
+                          freq="W-MON" if period == "week" else "D")
+    act = act.pivot(index="period", columns="decision", values="prompts").reindex(slots, fill_value=0).fillna(0)
+    act = act.rename_axis("period").reset_index().melt("period", var_name="decision", value_name="prompts")
+    act["label"] = act["period"].dt.strftime("%d %b")
+    act["stack"] = act["decision"].map({"Allowed": 0, "Blocked": 1}).fillna(2)
+    bar_px = int(max(3, min(24, 0.6 * 700 / len(slots))))  # thin columns, capped at 24px
+    activity = alt.Chart(act).mark_bar(size=bar_px, stroke="#ffffff", strokeWidth=1).encode(
+        x=alt.X("label:O", title=None, sort=act["label"].unique().tolist(),
+                axis=alt.Axis(labelAngle=0, ticks=False, labelOverlap="greedy", labelSeparation=8)),
+        y=alt.Y("sum(prompts):Q", title="Prompts", axis=alt.Axis(tickMinStep=1)),
+        color=alt.Color("decision:N", scale=DECISION_SCALE),
+        order=alt.Order("stack:Q"),
+        tooltip=[alt.Tooltip("label:O", title="Week of" if period == "week" else "Day"),
+                 alt.Tooltip("decision:N", title="Decision"), alt.Tooltip("sum(prompts):Q", title="Prompts")],
+    )
+    show(activity, 250)
+with o2:
+    st.markdown("**What people asked for** · intent of allowed prompts")
+    intents = (P["intent"].dropna().str.split(", ").explode().value_counts()
+               .rename_axis("intent").reset_index(name="prompts"))
+    if intents.empty:
+        st.caption("No intent classifications for these filters. Blocked prompts never reach the intent classifier.")
+    else:
+        chart, h = hbar(intents, "intent", "prompts", BLUE, "Prompts")
+        show(chart, h)
 
-# --------------------------------------------------------------------------- safety
-section("Is it safe?", "Risk and policy labels come from Cortexa's decision gate, which checks every prompt "
-                       "before it reaches a model.")
+
+# =========================================================================== 2. Security & policy
+section("Security & policy", "security-policy", "Risk and policy labels come from Cortexa's decision gate, which "
+                                                "checks every prompt before it reaches a model.")
 c1, c2 = st.columns(2, gap="large")
 with c1:
     st.markdown("**Prompts by risk level**")
@@ -340,7 +390,7 @@ if has_users:
              .reset_index())
     users = users[users["blocked"] > 0].sort_values(["blocked", "prompts"], ascending=False).head(10)
     if users.empty:
-        st.caption("No user had a prompt blocked in this period.")
+        st.caption("No user had a prompt blocked for these filters.")
     else:
         chart, h = hbar(users, "user_id", "blocked", ORANGE, "Blocked prompts",
                         tooltip=[alt.Tooltip("user_id:N", title="User"), alt.Tooltip("blocked:Q", title="Blocked"),
@@ -356,39 +406,32 @@ else:
 st.markdown("**Prompts to review** · blocked, or rated medium/high risk")
 review = P[(P["decision"] == "Blocked") | P["risk"].isin(["High", "Medium"])]
 if review.empty:
-    st.caption("Nothing to review in this period.")
+    st.caption("Nothing to review for these filters.")
 else:
+    review_cols = ["time", "app", "user_id", "prompt", "decision", "risk", "category_policy", "gate_reason"]
     st.dataframe(
-        review[["time", "user_id", "prompt", "decision", "risk", "category_policy", "gate_reason"]],
-        hide_index=True, height=min(38 + 35 * len(review), 320),
-        column_order=["time", "user_id", "prompt", "decision", "risk", "category_policy", "gate_reason"]
-        if has_users else ["time", "prompt", "decision", "risk", "category_policy", "gate_reason"],
+        review[review_cols], hide_index=True, height=min(38 + 35 * len(review), 320),
+        column_order=review_cols if has_users else [c for c in review_cols if c != "user_id"],
         column_config={
             "time": st.column_config.DatetimeColumn("Time (UTC)", format="DD MMM YYYY, HH:mm"),
-            "user_id": "User", "prompt": st.column_config.TextColumn("Prompt", width="large"),
+            "app": "Application", "user_id": "User", "prompt": st.column_config.TextColumn("Prompt", width="large"),
             "decision": "Decision", "risk": "Risk", "category_policy": "Category (policy)",
             "gate_reason": st.column_config.TextColumn("Gate explanation", width="large"),
         })
 
-# --------------------------------------------------------------------------- usage
-section("How is it being used?", "Only allowed prompts go on to the intent classifier and router.")
+
+# =========================================================================== 3. Usage intelligence
+section("Usage intelligence", "usage-intelligence", "How allowed prompts were handled, what broke, and what the "
+                                                    "models cost in calls and tokens.")
 u1, u2 = st.columns(2, gap="large")
 with u1:
-    st.markdown("**What people asked for** · intent")
-    intents = P["intent"].dropna().str.split(", ").explode().value_counts().rename_axis("intent").reset_index(name="prompts")
-    if intents.empty:
-        st.caption("No intent classifications in this period.")
-    else:
-        chart, h = hbar(intents, "intent", "prompts", BLUE, "Prompts")
-        show(chart, h)
-with u2:
     routed = P[P["routes"].notna()]
     st.markdown(f"**What the router sent them to** · share of {len(routed):,} routed prompts")
     if routed.empty:
-        st.caption("No routing decisions in this period.")
+        st.caption("No routing decisions for these filters. Blocked prompts never reach the router.")
     else:
-        caps = list(cd.ROUTE_FLAGS.values()) + ["Direct answer only"]
-        counts = {c: int(routed["routes"].map(lambda r, c=c: c in r).sum()) for c in caps[:-1]}
+        caps = list(cd.ROUTE_FLAGS.values())
+        counts = {c: int(routed["routes"].map(lambda r, c=c: c in r).sum()) for c in caps}
         counts["Direct answer only"] = int(routed["routes"].map(len).eq(0).sum())
         cap_df = pd.DataFrame({"capability": list(counts), "prompts": list(counts.values())})
         cap_df["share"] = cap_df["prompts"] / len(routed)
@@ -398,23 +441,21 @@ with u2:
                                  alt.Tooltip("share:Q", title="Share", format=".0%")])
         show(chart, h)
         st.caption("A prompt can need more than one capability.")
+with u2:
+    st.markdown("**Pipeline errors** · raised inside Cortexa for allowed prompts")
+    errors = cd.error_table(P)
+    if errors.empty:
+        st.success("No pipeline errors for these filters.")
+    else:
+        st.dataframe(errors[["Module", "Error code", "Occurrences", "Last seen (UTC)", "Message"]], hide_index=True,
+                     column_config={"Last seen (UTC)": st.column_config.DatetimeColumn(format="DD MMM, HH:mm"),
+                                    "Message": st.column_config.TextColumn(width="large")})
+        st.caption(f"{failed} of {len(allowed)} allowed prompts ended in a failed run. "
+                   "A failure in one module can cause errors in the modules after it.")
 
-# --------------------------------------------------------------------------- pipeline health
-section("Is it working?", "Errors raised inside the Cortexa pipeline for allowed prompts.")
-errors = cd.error_table(P)
-if errors.empty:
-    st.success("No pipeline errors in this period.")
-else:
-    st.dataframe(errors, hide_index=True,
-                 column_config={"Message": st.column_config.TextColumn(width="large"),
-                                "Last seen (UTC)": st.column_config.DatetimeColumn(format="DD MMM YYYY, HH:mm")})
-    st.caption(f"{failed} of {len(allowed)} allowed prompts ended in a failed run. "
-               "A failure in one module can cause errors in the modules after it.")
-
-# --------------------------------------------------------------------------- LLM usage
-section("LLM usage", "Model calls made by the pipeline, including the decision-gate checks on blocked prompts.")
+st.markdown("**LLM usage** · model calls made by the pipeline, including decision-gate checks on blocked prompts")
 if C.empty:
-    st.caption("No LLM calls in this period.")
+    st.caption("No LLM calls for these filters.")
 else:
     m = st.columns(4)
     tile(m[0], "LLM calls", fmt_int(len(C)), f"{len(C) / n:.1f} per prompt")
@@ -423,7 +464,7 @@ else:
     tile(m[3], "Median call time", f"{C['duration_ms'].median() / 1000:.1f} s",
          f"95th percentile {C['duration_ms'].quantile(0.95) / 1000:.1f} s")
     st.markdown("")
-    l1, l2 = st.columns([1, 1], gap="large")
+    l1, l2 = st.columns(2, gap="large")
     with l1:
         st.markdown("**Tokens by pipeline step** · input + output")
         steps = (C.assign(model=short_model(C["llm_name"]))
@@ -450,23 +491,29 @@ else:
                                     for c in by_model.columns[1:]})
         st.caption("Model names are shortened (provider prefix and version suffix removed).")
 
-# --------------------------------------------------------------------------- audit trail
-section("Audit trail", "Every prompt in the selected period. Search, then download as CSV.")
+
+# =========================================================================== 4. Prompt explorer
+section("Prompt explorer", "prompt-explorer", "Every prompt for these filters. Search, click a row to inspect it, "
+                                              "or download the list as CSV.")
 query = st.text_input("Search prompts, users, policies or event IDs", placeholder="e.g. password, USR-007, S13")
 audit = P.copy()
 audit["capabilities"] = audit["routes"].map(lambda r: ", ".join(r) if isinstance(r, list) else None)
-cols = ["time", "user_id", "session_id", "prompt", "decision", "risk", "category", "policy", "intent",
+cols = ["time", "app", "user_id", "session_id", "prompt", "decision", "risk", "category", "policy", "intent",
         "capabilities", "outcome", "error_codes", "response", "entrypoint", "event_id"]
-audit = audit[cols]
+audit = audit[cols + ["routes", "gate_reason", "errors"]]
 if query:
-    hay = audit.astype(object).where(audit.notna(), "").astype(str).agg(" ".join, axis=1).str.lower()
+    hay = audit[cols].astype(object).where(audit[cols].notna(), "").astype(str).agg(" ".join, axis=1).str.lower()
     audit = audit[hay.str.contains(query.lower(), regex=False)]
-st.dataframe(
-    audit, hide_index=True, height=420,
+audit = audit.reset_index(drop=True)
+
+picked_rows = st.dataframe(
+    audit[cols], hide_index=True, height=380, on_select="rerun", selection_mode="single-row",
+    key=f"explorer_{DATASET}_{app_pick}_{decision_pick}_{start}_{end}_{query}",  # new filters reset the pick
     column_order=cols if has_users else [c for c in cols if c not in ("user_id", "session_id")],
     column_config={
         "time": st.column_config.DatetimeColumn("Time (UTC)", format="DD MMM YYYY, HH:mm:ss"),
-        "user_id": "User", "session_id": "Session", "prompt": st.column_config.TextColumn("Prompt", width="large"),
+        "app": "Application", "user_id": "User", "session_id": "Session",
+        "prompt": st.column_config.TextColumn("Prompt", width="large"),
         "decision": "Decision", "risk": "Risk", "category": "Category", "policy": "Policy", "intent": "Intent",
         "capabilities": "Capabilities", "outcome": "Outcome", "error_codes": "Errors",
         "response": st.column_config.TextColumn("Response", width="medium"), "entrypoint": "Entrypoint",
@@ -474,5 +521,49 @@ st.dataframe(
     })
 st.download_button(
     f"Download {len(audit):,} rows as CSV",
-    audit.to_csv(index=False).encode("utf-8"),
+    audit[cols].to_csv(index=False).encode("utf-8"),
     file_name=f"cortexa_audit_{DATASET}_{start:%Y%m%d}_{end:%Y%m%d}.csv", mime="text/csv")
+
+if audit.empty:
+    st.caption("No prompts match this search.")
+else:
+    rows = picked_rows.selection.rows if picked_rows is not None else []
+    i = rows[0] if rows and rows[0] < len(audit) else 0
+    r = audit.iloc[i]
+    st.markdown("")
+    st.markdown(f"**Selected prompt** · {'row you clicked' if rows else 'latest prompt (click a row above to change)'}")
+    with st.container(border=True):
+        st.markdown(f'<div class="meta">User prompt</div>'
+                    f'<div class="prompt-text">{html.escape(text_or(r["prompt"], "(no prompt text)"))}</div>'
+                    f'<div class="meta">{r["time"]:%d %b %Y, %H:%M:%S} UTC · {html.escape(r["app"])} · '
+                    f'User {html.escape(str(text_or(r["user_id"])))} · Session {html.escape(str(text_or(r["session_id"])))} · '
+                    f'{html.escape(str(text_or(r["entrypoint"])))} · Event {r["event_id"]}</div>',
+                    unsafe_allow_html=True)
+    d = st.columns(5)
+    tile(d[0], "Decision", r["decision"], small=True)
+    tile(d[1], "Risk", r["risk"], small=True)
+    tile(d[2], "Policy", text_or(r["policy"]), html.escape(text_or(r["category"], "")), small=True)
+    tile(d[3], "Intent", text_or(r["intent"]), "" if text_or(r["intent"], "") else "not classified", small=True)
+    tile(d[4], "Outcome", r["outcome"], text_or(r["error_codes"], ""), small=True)
+    st.markdown("")
+    e1, e2 = st.columns(2, gap="large")
+    with e1:
+        with st.container(border=True):
+            st.markdown("**Decision explanation**")
+            st.write(text_or(r["gate_reason"], "No explanation recorded."))
+            if r["errors"]:
+                st.markdown("**Errors**")
+                for module, code, message, _ in r["errors"]:
+                    st.caption(f"{module} · {code}: {str(message).splitlines()[0][:200]}")
+    with e2:
+        with st.container(border=True):
+            st.markdown("**Capabilities the router asked for**")
+            if isinstance(r["routes"], list):
+                marks = "".join(f'<div>✓ {c}</div>' if c in r["routes"] else f'<div class="off">– {c}</div>'
+                                for c in cd.ROUTE_FLAGS.values())
+                st.markdown(f'<div class="caps">{marks}</div>', unsafe_allow_html=True)
+            else:
+                st.write("Not routed. The prompt was blocked before it reached the router.")
+            st.caption("Router flags show what was requested; they don't prove a tool or dataset was used.")
+    with st.expander("Response returned to the user"):
+        st.write(text_or(r["response"], "No response recorded."))

@@ -19,6 +19,7 @@ BASE = Path(__file__).parent / "data"
 REAL_DIR = BASE / "real" / "uploads"
 REAL_ARCHIVE = BASE / "real" / "archive"
 SYNTHETIC_FILE = BASE / "synthetic" / "clickhouse_export_synthetic.xlsx"
+APP_NAMES_FILE = BASE / "app_names.csv"   # optional: app_id,app_name
 
 REQUIRED = {
     "graph_state_events": ["event_id", "submodule", "submodule_delta", "event_timestamp",
@@ -60,7 +61,7 @@ def _clean(graph, calls):
     for df in (graph, calls):
         df["event_timestamp"] = pd.to_datetime(df["event_timestamp"], errors="coerce")
         df["event_id"] = df["event_id"].astype(str)
-        for col in ("user_id", "session_id", "entrypoint", "error_message"):
+        for col in ("user_id", "session_id", "entrypoint", "error_message", "app_id"):
             if col not in df.columns:
                 df[col] = None
     for col in ("input_tokens", "output_tokens", "duration_ms"):
@@ -102,6 +103,21 @@ def save_upload(uploaded_file, replace):
     return target
 
 
+def app_names():
+    """ClickHouse stores only app IDs. data/app_names.csv (app_id,app_name) gives them readable names."""
+    try:
+        df = pd.read_csv(APP_NAMES_FILE, dtype=str).dropna()
+        return dict(zip(df["app_id"].str.strip(), df["app_name"].str.strip()))
+    except (FileNotFoundError, KeyError, ValueError):
+        return {}
+
+
+def app_label(app_id, names):
+    if app_id is None or (isinstance(app_id, float) and pd.isna(app_id)):
+        return "Not recorded"
+    return names.get(str(app_id), f"App {str(app_id)[:8]}")
+
+
 # --------------------------------------------------------------------------- prompt-level table
 
 def _json(text):
@@ -119,7 +135,7 @@ def build_prompts(graph):
     rows = {}
     for r in graph.itertuples(index=False):
         p = rows.setdefault(r.event_id, {
-            "event_id": r.event_id, "time": r.event_timestamp, "user_id": r.user_id,
+            "event_id": r.event_id, "time": r.event_timestamp, "app_id": r.app_id, "user_id": r.user_id,
             "session_id": r.session_id, "entrypoint": r.entrypoint, "prompt": None,
             "decision": None, "category": None, "risk": None, "policy": None, "gate_reason": None,
             "intent": None, "routes": None, "status": None, "response": None, "errors": [],
