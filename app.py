@@ -302,13 +302,12 @@ tab_overview, tab_security, tab_usage, tab_explorer = st.tabs(
 
 # =========================================================================== 1. Executive overview
 with tab_overview:
-    k = st.columns(6)
+    k = st.columns(5)
     tile(k[0], "Prompt events", fmt_int(n), f"{P['date'].nunique()} active days")
     tile(k[1], "Allowed", fmt_int(len(allowed)), f"{len(allowed) / n:.0%} of prompts")
     tile(k[2], "Blocked", fmt_int(blocked), f"{blocked / n:.0%} of prompts")
-    tile(k[3], "High-risk labels", fmt_int(len(high)), high_note)
-    tile(k[4], "Execution failures", fmt_int(failed), f"{failed / max(len(allowed), 1):.0%} of allowed")
-    tile(k[5], "Users", fmt_int(P["user_id"].nunique()) if has_users else "–",
+    tile(k[3], "Execution failures", fmt_int(failed), f"{failed / max(len(allowed), 1):.0%} of allowed")
+    tile(k[4], "Users", fmt_int(P["user_id"].nunique()) if has_users else "–",
          f"{P['session_id'].nunique()} sessions" if has_users else "user_id not recorded")
     st.markdown("")
 
@@ -506,20 +505,41 @@ with tab_usage:
 
 # =========================================================================== 4. Prompt explorer
 with tab_explorer:
-    query = st.text_input("Search prompts, users, policies or event IDs", placeholder="e.g. password, USR-007, S13")
+    detail = st.container()  # the selected prompt is drawn here, above the table, once we know which row it is
+
+    st.markdown("")
+    st.markdown("**All prompts** · filter by column or search, then click a row to show it above")
+    # Excel-style filters for the columns that hold a fixed set of values. Options come from the whole
+    # dataset so a choice stays valid when the sidebar filters change.
+    filter_cols = [("app", "Application"), ("decision", "Decision"), ("risk", "Risk"), ("category", "Category"),
+                   ("policy", "Policy"), ("intent", "Intent"), ("outcome", "Outcome"), ("entrypoint", "Entrypoint")]
+    blank = "(blank)"
+    as_text = lambda series: series.astype(object).where(series.notna(), blank).astype(str)
+    picks = {}
+    fcols = st.columns(4)
+    for i, (col, label) in enumerate(filter_cols):
+        options = sorted(as_text(prompts_all[col]).unique())
+        picks[col] = fcols[i % 4].multiselect(label, options, placeholder="All", key=f"xf_{DATASET}_{col}")
+    query = st.text_input("Search prompts, users, sessions or event IDs", placeholder="e.g. password, USR-007, S13")
+
     audit = P.copy()
     audit["capabilities"] = audit["routes"].map(lambda r: ", ".join(r) if isinstance(r, list) else None)
     cols = ["time", "app", "user_id", "session_id", "prompt", "decision", "risk", "category", "policy", "intent",
             "capabilities", "outcome", "error_codes", "response", "entrypoint", "event_id"]
     audit = audit[cols + ["routes", "gate_reason", "errors"]]
+    for col, chosen in picks.items():
+        if chosen:
+            audit = audit[as_text(audit[col]).isin(chosen)]
     if query:
         hay = audit[cols].astype(object).where(audit[cols].notna(), "").astype(str).agg(" ".join, axis=1).str.lower()
         audit = audit[hay.str.contains(query.lower(), regex=False)]
     audit = audit.reset_index(drop=True)
 
+    view_key = "|".join([DATASET, app_pick, decision_pick, str(start), str(end), query] +
+                        [",".join(v) for v in picks.values()])
     picked_rows = st.dataframe(
         audit[cols], hide_index=True, height=380, on_select="rerun", selection_mode="single-row",
-        key=f"explorer_{DATASET}_{app_pick}_{decision_pick}_{start}_{end}_{query}",  # new filters reset the pick
+        key=f"explorer_{abs(hash(view_key))}",  # any filter change resets the clicked row
         column_order=cols if has_users else [c for c in cols if c not in ("user_id", "session_id")],
         column_config={
             "time": st.column_config.DatetimeColumn("Time (UTC)", format="DD MMM YYYY, HH:mm:ss"),
@@ -535,39 +555,39 @@ with tab_explorer:
         audit[cols].to_csv(index=False).encode("utf-8"),
         file_name=f"cortexa_audit_{DATASET}_{start:%Y%m%d}_{end:%Y%m%d}.csv", mime="text/csv")
 
-    if audit.empty:
-        st.caption("No prompts match this search.")
-    else:
-        rows = picked_rows.selection.rows if picked_rows is not None else []
-        i = rows[0] if rows and rows[0] < len(audit) else 0
-        r = audit.iloc[i]
-        st.markdown("")
-        st.markdown(f"**Selected prompt** · {'row you clicked' if rows else 'latest prompt (click a row above to change)'}")
-        with st.container(border=True):
-            st.markdown(f'<div class="meta">User prompt</div>'
-                        f'<div class="prompt-text">{html.escape(text_or(r["prompt"], "(no prompt text)"))}</div>'
-                        f'<div class="meta">{r["time"]:%d %b %Y, %H:%M:%S} UTC · {html.escape(r["app"])} · '
-                        f'User {html.escape(str(text_or(r["user_id"])))} · Session {html.escape(str(text_or(r["session_id"])))} · '
-                        f'{html.escape(str(text_or(r["entrypoint"])))} · Event {r["event_id"]}</div>',
-                        unsafe_allow_html=True)
-        d = st.columns(5)
-        tile(d[0], "Decision", r["decision"], small=True)
-        tile(d[1], "Risk", r["risk"], small=True)
-        tile(d[2], "Policy", text_or(r["policy"]), html.escape(text_or(r["category"], "")), small=True)
-        tile(d[3], "Intent", text_or(r["intent"]), "" if text_or(r["intent"], "") else "not classified", small=True)
-        tile(d[4], "Outcome", r["outcome"], text_or(r["error_codes"], ""), small=True)
-        st.markdown("")
-        e1, e2 = st.columns(2, gap="large")
-        with e1:
+    with detail:
+        if audit.empty:
+            st.info("No prompts match these filters.")
+        else:
+            rows = picked_rows.selection.rows if picked_rows is not None else []
+            i = rows[0] if rows and rows[0] < len(audit) else 0
+            r = audit.iloc[i]
+            st.markdown(f"**Selected prompt** · "
+                        f"{'row you clicked' if rows else 'latest prompt (click a row in the table below to change)'}")
             with st.container(border=True):
+                st.markdown(f'<div class="meta">User prompt</div>'
+                            f'<div class="prompt-text">{html.escape(text_or(r["prompt"], "(no prompt text)"))}</div>'
+                            f'<div class="meta">{r["time"]:%d %b %Y, %H:%M:%S} UTC · {html.escape(r["app"])} · '
+                            f'User {html.escape(str(text_or(r["user_id"])))} · '
+                            f'Session {html.escape(str(text_or(r["session_id"])))} · '
+                            f'{html.escape(str(text_or(r["entrypoint"])))} · Event {r["event_id"]}</div>',
+                            unsafe_allow_html=True)
+            d = st.columns(5)
+            tile(d[0], "Decision", r["decision"], small=True)
+            tile(d[1], "Risk", r["risk"], small=True)
+            tile(d[2], "Policy", text_or(r["policy"]), html.escape(text_or(r["category"], "")), small=True)
+            tile(d[3], "Intent", text_or(r["intent"]), "" if text_or(r["intent"], "") else "not classified", small=True)
+            tile(d[4], "Outcome", r["outcome"], text_or(r["error_codes"], ""), small=True)
+            st.markdown("")
+            e1, e2 = st.columns(2, gap="medium")
+            with e1, st.container(border=True):
                 st.markdown("**Decision explanation**")
                 st.write(text_or(r["gate_reason"], "No explanation recorded."))
                 if r["errors"]:
                     st.markdown("**Errors**")
                     for module, code, message, _ in r["errors"]:
                         st.caption(f"{module} · {code}: {str(message).splitlines()[0][:200]}")
-        with e2:
-            with st.container(border=True):
+            with e2, st.container(border=True):
                 st.markdown("**Capabilities the router asked for**")
                 if isinstance(r["routes"], list):
                     marks = "".join(f'<div>✓ {c}</div>' if c in r["routes"] else f'<div class="off">– {c}</div>'
@@ -576,5 +596,5 @@ with tab_explorer:
                 else:
                     st.write("Not routed. The prompt was blocked before it reached the router.")
                 st.caption("Router flags show what was requested; they don't prove a tool or dataset was used.")
-        with st.expander("Response returned to the user"):
-            st.write(text_or(r["response"], "No response recorded."))
+            with st.expander("Response returned to the user"):
+                st.write(text_or(r["response"], "No response recorded."))
