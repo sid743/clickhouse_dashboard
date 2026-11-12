@@ -21,6 +21,17 @@ REAL_ARCHIVE = BASE / "real" / "archive"
 SYNTHETIC_FILE = BASE / "synthetic" / "clickhouse_export_synthetic.xlsx"
 APP_NAMES_FILE = BASE / "app_names.csv"   # optional: app_id,app_name
 
+# Which models the dashboard calls SLM (small language model) and LLM. Add new models here.
+# A model not listed counts as LLM if it answers the user (llm_caller step), otherwise SLM.
+MODEL_TIER = {
+    "amazon.nova-lite-v1:0": "SLM",
+    "openai.gpt-oss-120b-1:0": "LLM",
+}
+
+
+def model_tier(llm_name, submodule):
+    return MODEL_TIER.get(str(llm_name), "LLM" if submodule == "llm_caller" else "SLM")
+
 REQUIRED = {
     "graph_state_events": ["event_id", "submodule", "submodule_delta", "event_timestamp",
                            "submodule_execution_status"],
