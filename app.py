@@ -15,11 +15,12 @@ import streamlit as st
 import auth
 import cortexa_data as cd
 
-MARK = Path(__file__).parent / "assets" / "cortexa_mark.png"
+MARK = Path(__file__).parent / "assets" / "cortexa_mark.png"    # icon only, used for the browser tab
+LOGO = Path(__file__).parent / "assets" / "cortexa_logo.png"    # full logo from cortexa.global, used in the sidebar
 APP_TITLE = "AI Auditing and Analysis"
 st.set_page_config(page_title=f"Cortexa · {APP_TITLE}", layout="wide",
                    page_icon=str(MARK) if MARK.exists() else None)
-MARK_B64 = base64.b64encode(MARK.read_bytes()).decode() if MARK.exists() else ""
+LOGO_B64 = base64.b64encode(LOGO.read_bytes()).decode() if LOGO.exists() else ""
 
 # --------------------------------------------------------------------------- colours & style
 # Allowed / blocked are the two series used across the page (validated pair, white surface).
@@ -52,9 +53,9 @@ st.markdown(f"""
   .stTabs [data-baseweb="tab-highlight"] {{ background: linear-gradient(90deg, {BLUE}, {VIOLET}); height: 4px; }}
   .big-split {{ font-size: 1.35rem; color: {INK}; margin: 0.4rem 0 0.2rem 0; }}
   .tier-head {{ font-size: 1.25rem; font-weight: 700; color: {VIOLET}; margin-bottom: 0.4rem; }}
-  .brand {{ display: flex; align-items: center; gap: 10px; font-size: 1.5rem; font-weight: 700; letter-spacing: 0.04em;
+  .brand {{ display: flex; align-items: center; margin-bottom: 0.2rem;
            background: linear-gradient(90deg, {BLUE}, {VIOLET}); -webkit-background-clip: text; color: transparent; }}
-  .brand img {{ height: 34px; }}
+  .brand img {{ width: 200px; max-width: 100%; }}
   [data-testid="stHeading"] hr {{ background: linear-gradient(90deg, {BLUE}, {VIOLET}) !important; height: 2px; border: 0; }}
   .brand-sub {{ font-size: 0.75rem; font-weight: 600; color: {MUTED}; letter-spacing: 0.08em; margin-bottom: 0.6rem; }}
   .side-head {{ font-size: 0.8rem; font-weight: 700; color: {INK}; letter-spacing: 0.06em; margin: 0.4rem 0 0.2rem 0; }}
@@ -115,7 +116,9 @@ def text_or(value, default="–"):
     return default if value is None or (isinstance(value, float) and pd.isna(value)) or value == "" else value
 
 
-# --------------------------------------------------------------------------- login
+# --------------------------------------------------------------------------- upload password
+# There is no login. Anyone can view the dashboard; saving a new export asks for an admin password
+# (any user with role = "admin" in .streamlit/secrets.toml).
 
 def load_users():
     try:
@@ -124,33 +127,11 @@ def load_users():
         return {}
 
 
-def login_screen():
-    users = load_users()
-    _, mid, _ = st.columns([1, 1.1, 1])
-    with mid:
-        st.markdown("")
-        st.markdown("### Cortexa · AI Auditing & Security")
-        st.caption("Sign in to view the dashboard.")
-        if not users:
-            st.error("No users are configured. Add them to .streamlit/secrets.toml (see README).")
-            return
-        with st.form("login"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
-        if submitted:
-            role = auth.authenticate(users, username, password)
-            if role:
-                st.session_state.update(user=username.strip(), role=role)
-                st.rerun()
-            st.error("Wrong username or password.")
+def is_admin_password(password):
+    return any(cfg.get("role") == "admin" and auth.check_password(password, cfg.get("password_hash", ""))
+               for cfg in load_users().values())
 
 
-if "role" not in st.session_state:
-    login_screen()
-    st.stop()
-
-IS_ADMIN = st.session_state.role == "admin"
 st.session_state.setdefault("dataset", "real")
 st.session_state.setdefault("upload_key", 0)
 
@@ -176,15 +157,34 @@ def load_dataset(name):
         return (*load(file_key([cd.SYNTHETIC_FILE])), None)
     files = cd.real_files()
     if not files:
-        msg = "No real export has been uploaded yet." + (" Use the upload panel in the sidebar." if IS_ADMIN else
-                                                          " Ask an admin to upload one.")
+        msg = "No real export has been uploaded yet. Use the upload panel in the sidebar."
         return None, None, msg
     return (*load(file_key(files)), None)
 
 
+@st.dialog("Admin password required")
+def confirm_upload(up, replace):
+    st.write(f"Enter the admin password to {'replace the real data with' if replace else 'add'} **{up.name}**.")
+    if not load_users():
+        st.error("No admin user is set up. Add one to .streamlit/secrets.toml (see README).")
+        return
+    with st.form("upload_password"):
+        password = st.text_input("Admin password", type="password")
+        ok = st.form_submit_button("Upload", type="primary", width="stretch")
+    if ok:
+        if is_admin_password(password):
+            saved = cd.save_upload(up, replace=replace)
+            st.session_state.upload_msg = f"Saved {saved.name}."
+            st.session_state.upload_key += 1
+            st.session_state.dataset = "real"
+            st.rerun()
+        st.error("Wrong password. Nothing was uploaded.")
+
+
 def admin_upload():
     st.markdown('<div class="side-head">UPLOAD A CLICKHOUSE EXPORT</div>', unsafe_allow_html=True)
-    st.caption("Excel file with the sheets graph_state_events and llm_calls. Goes into the real-data dashboard.")
+    st.caption("Excel file with the sheets graph_state_events and llm_calls. Goes into the real-data dashboard. "
+               "Needs the admin password.")
     if msg := st.session_state.pop("upload_msg", None):
         st.success(msg)
     up = st.file_uploader("Export (.xlsx)", type=["xlsx"], key=f"up_{st.session_state.upload_key}",
@@ -205,12 +205,8 @@ def admin_upload():
             mode = st.radio("Load it by", ["Adding to current real data", "Replacing current real data"],
                             help="Adding keeps earlier uploads and skips duplicate rows. "
                                  "Replacing moves earlier uploads to data/real/archive.")
-            if st.button("Save to dashboard", type="primary", width="stretch", disabled=not len(p_new)):
-                saved = cd.save_upload(up, replace=mode.startswith("Replacing"))
-                st.session_state.upload_msg = f"Saved {saved.name}."
-                st.session_state.upload_key += 1
-                st.session_state.dataset = "real"
-                st.rerun()
+            if st.button("Upload to dashboard", type="primary", width="stretch", disabled=not len(p_new)):
+                confirm_upload(up, mode.startswith("Replacing"))
         except ValueError as exc:
             st.error(str(exc))
     files = cd.real_files()
@@ -224,7 +220,7 @@ def admin_upload():
 # --------------------------------------------------------------------------- sidebar: data & filters
 
 sidebar = st.sidebar
-sidebar.markdown(f'<div class="brand"><img src="data:image/png;base64,{MARK_B64}"/>CORTEXA</div>'
+sidebar.markdown(f'<div class="brand"><img src="data:image/png;base64,{LOGO_B64}" alt="CORTEXA"/></div>'
                  '<div class="brand-sub">AI AUDIT CONSOLE</div>',
                  unsafe_allow_html=True)
 sidebar.markdown('<div class="side-head">DATA & FILTERS</div>', unsafe_allow_html=True)
@@ -252,15 +248,8 @@ if not problem and not prompts_all.empty:
     sidebar.caption("Filters apply to every section.")
 
 sidebar.divider()
-sidebar.markdown(f"Signed in as **{st.session_state.user}** · {'Admin' if IS_ADMIN else 'Viewer'}")
-if sidebar.button("Sign out", width="stretch"):
-    for k in ("user", "role"):
-        st.session_state.pop(k, None)
-    st.rerun()
-if IS_ADMIN:
-    sidebar.divider()
-    with sidebar:
-        admin_upload()
+with sidebar:
+    admin_upload()
 
 
 # --------------------------------------------------------------------------- header

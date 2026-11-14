@@ -1,4 +1,4 @@
-# Cortexa · AI Auditing & Security dashboard
+# Cortexa · AI Auditing and Analysis dashboard
 
 A one-page Streamlit dashboard over Cortexa's ClickHouse telemetry. It answers
 "How is our AI being used, and is it safe?"
@@ -15,25 +15,20 @@ streamlit run app.py
 
 The app opens at http://localhost:8501. Next time you only need the `activate` and `streamlit run` lines.
 
-## Logins
+## Access and uploads
 
-| User | Password | Can do |
-|---|---|---|
-| `admin` | `Cortexa@Admin1` | View the dashboard, upload ClickHouse exports |
-| `viewer` | `Cortexa@View1` | View the dashboard |
+There is no login: anyone who opens the app sees the dashboard. Uploading a new export needs the
+admin password, which a pop-up asks for when you click **Upload to dashboard**.
 
-Change these before sharing the app. To set a new password:
+The admin password is `Cortexa@Admin1`. Change it before sharing the app:
 
 ```
 python auth.py
 ```
 
-Type the password twice, then paste the printed hash into `.streamlit\secrets.toml` as that user's
-`password_hash`. To add a user, copy one of the `[users.xxx]` blocks, rename it and set `role` to
-`admin` or `viewer`.
-
-This login is fine for a demo or an internal tool. It keeps no audit of sign-ins, has no lockout,
-and a browser refresh signs you out. For production, put the app behind the company's SSO.
+Type the new password twice, then paste the printed hash into `.streamlit\secrets.toml` as the
+`password_hash` under `[users.admin]`. Any user there with `role = "admin"` can upload with their
+password. The `viewer` entry is no longer used.
 
 ## Data
 
@@ -68,14 +63,18 @@ Use the sidebar. The file must be `.xlsx` with the sheets `graph_state_events` a
 
 ## What's on the page
 
-One scrolling page with four sections. The links under the title jump to each one.
+Four tabs:
 
-| Section | Shows | Form |
-|---|---|---|
-| Executive overview | Prompts, blocked, high-risk, failed runs, users; prompt activity per day (per week past ~2 months), allowed vs blocked; intents | Stat tiles, stacked columns, ranked bars |
-| Security & policy | Prompts by risk level and by policy category; users with the most blocks; prompts to review | Bars + table |
-| Usage intelligence | Capabilities the router asked for; pipeline errors; LLM calls, tokens and latency; tokens by pipeline step; per-model table | Bars, tables, stat tiles |
-| Prompt explorer | Every prompt, searchable, with CSV download. Click a row to see its decision, risk, policy, intent, outcome, gate explanation, router flags and response | Table + detail panel |
+| Tab | Shows |
+|---|---|
+| Executive overview | Cards: prompt events, allowed, blocked, execution failures, users. Charts: execution (% allowed vs blocked), intent, prompt activity trend (line), what the router sent prompts to |
+| Security & policy | Cards: allowed, blocked, high-risk labels. Charts: risk level, policy category (allowed vs blocked), top 10 users by high-risk prompts |
+| Usage intelligence | SLM and LLM cards (calls, latency, input and output tokens), tokens by pipeline step for each, pipeline errors |
+| Prompt explorer | The selected prompt at the top (decision, risk, policy, intent, outcome, gate explanation, router flags, response), then every prompt in a table with Excel-style column filters (application, decision, risk, category, policy, intent, outcome, entrypoint), a search box and CSV download. Click a row to show it at the top |
+
+SLM vs LLM: `MODEL_TIER` at the top of `cortexa_data.py` says which model is which
+(nova-lite = SLM, gpt-oss-120b = LLM). Add new models there. A model that isn't listed counts as LLM
+when it writes the answer (`llm_caller` step) and SLM otherwise.
 
 Colours stay the same on every chart: blue = allowed, orange = blocked. Risk uses red, amber and
 green, always with its text label.
